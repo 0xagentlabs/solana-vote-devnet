@@ -1,0 +1,12 @@
+target/
+node_modules/
+.next/
+.vercel/
+*.keypair.json
+vote-program-keypair.json
+.env*
+!.env.example
+.agent_context/
+.multica/
+AGENTS.md
+*.tsbuildinfo
