@@ -5,8 +5,8 @@ import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { PublicKey, Transaction } from "@solana/web3.js";
 import { createAssociatedTokenAccountInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { CheckCircle2, Clock3, Landmark, ShieldCheck, Vote } from "lucide-react";
-import { CONFIG, MIN_VOTE_AMOUNT, PROGRAM_ID, PROPOSAL_FEE, claimable, claimIx, createProposalIx, joinIx, memberPda, parseConfig, parseMember, parseProposal, proposalPda, settleIx, voteIx, type Config, type Member, type Proposal } from "../lib/vote";
+import { CheckCircle2, Clock3, Landmark, Recycle, ShieldCheck, Vote } from "lucide-react";
+import { CONFIG, MIN_VOTE_AMOUNT, PROGRAM_ID, PROPOSAL_FEE, REWARD_STATE, claimable, claimIx, claimRewardIx, createProposalIx, joinIx, memberPda, parseConfig, parseMember, parseProposal, parseRewardReceipt, parseRewardState, proposalPda, rewardClaimable, rewardReceiptPda, settleIx, voteIx, type Config, type Member, type Proposal, type RewardReceipt, type RewardState } from "../lib/vote";
 
 const TOKEN_SCALE = 1_000_000n;
 const fmt = (value: bigint) => `${(Number(value) / Number(TOKEN_SCALE)).toLocaleString("zh-CN", { maximumFractionDigits: 6 })} CVOTE`;
@@ -18,6 +18,8 @@ export default function Home() {
   const wallet = useWallet();
   const [cfg, setCfg] = useState<Config>();
   const [member, setMember] = useState<Member>();
+  const [rewardState, setRewardState] = useState<RewardState>();
+  const [rewardReceipt, setRewardReceipt] = useState<RewardReceipt>();
   const [proposals, setProposals] = useState<ProposalView[]>([]);
   const [tokenBalance, setTokenBalance] = useState(0n);
   const [status, setStatus] = useState("连接钱包开始参与");
@@ -30,15 +32,19 @@ export default function Home() {
     const configAccount = await connection.getAccountInfo(CONFIG);
     const currentConfig = configAccount ? parseConfig(configAccount.data) : undefined;
     setCfg(currentConfig);
+    const rewardAccount = await connection.getAccountInfo(REWARD_STATE);
+    setRewardState(rewardAccount ? parseRewardState(rewardAccount.data) : undefined);
     if (wallet.publicKey) {
       const memberAccount = await connection.getAccountInfo(memberPda(wallet.publicKey));
       setMember(memberAccount ? parseMember(memberAccount.data) : undefined);
+      const receiptAccount = await connection.getAccountInfo(rewardReceiptPda(wallet.publicKey));
+      setRewardReceipt(receiptAccount ? parseRewardReceipt(receiptAccount.data) : undefined);
       if (currentConfig) {
         const ata = getAssociatedTokenAddressSync(currentConfig.mint, wallet.publicKey);
         try { setTokenBalance(BigInt((await connection.getTokenAccountBalance(ata)).value.amount)); }
         catch { setTokenBalance(0n); }
       }
-    } else { setMember(undefined); setTokenBalance(0n); }
+    } else { setMember(undefined); setRewardReceipt(undefined); setTokenBalance(0n); }
     const accounts = await connection.getProgramAccounts(PROGRAM_ID);
     const next = accounts.flatMap(({ pubkey, account }) => {
       try { return account.data[0] === 3 ? [{ address: pubkey, state: parseProposal(account.data) }] : []; }
@@ -52,6 +58,7 @@ export default function Home() {
 
   const available = useMemo(() => member ? claimable(member, now) : 0n, [member, now]);
   const claimReady = !!member && available > 0n && (member.lastClaimAt === 0 || now >= member.lastClaimAt + 24 * 60 * 60);
+  const rewardAvailable = member && rewardState ? rewardClaimable(rewardState, rewardReceipt) : 0n;
   const proposalStatus = (proposal: Proposal) => proposal.settled ? `已结算 · ${proposal.result === 0 ? "赞成" : "反对"}胜出` : now >= proposal.endAt ? "已到期 · 可结算回收" : "投票进行中";
   const amountNumber = Number(amount);
   const voteAmount = Number.isFinite(amountNumber) && amountNumber >= 0.01 ? BigInt(Math.round(amountNumber * 1e6)) : 0n;
@@ -83,6 +90,14 @@ export default function Home() {
     tx.add(claimIx(wallet.publicKey, cfg.treasury, ata));
     await send(tx, "领取");
   };
+  const claimGovernanceReward = async () => {
+    if (!wallet.publicKey || !cfg || !member || !rewardState) return;
+    const ata = getAssociatedTokenAddressSync(cfg.mint, wallet.publicKey);
+    const tx = new Transaction();
+    if (!await connection.getAccountInfo(ata)) tx.add(createAssociatedTokenAccountInstruction(wallet.publicKey, ata, wallet.publicKey, cfg.mint));
+    tx.add(claimRewardIx(wallet.publicKey, cfg.treasury, ata));
+    await send(tx, "领取治理权回流奖励");
+  };
   const create = async () => {
     if (!wallet.publicKey || !cfg || !proposalContent.trim()) return;
     const nonce = BigInt(Date.now());
@@ -111,6 +126,7 @@ export default function Home() {
     <section className="grid">
       <article><Landmark aria-hidden /><h2>加入社区</h2><p>首次加入自动锁定 1,000 枚额度，从链上时间开始释放。</p><div className={`state ${member ? "success" : ""}`}>{member ? `已加入 · ${date(member.joinedAt)}` : "尚未加入"}</div><button disabled={busy || !wallet.publicKey || !!member} onClick={join}>{member ? "已加入" : "加入社区"}</button></article>
       <article><Clock3 aria-hidden /><h2>领取份额</h2><p>每 24 小时领取已释放 Token，直至 365 天完全释放。</p><div className="balance"><span>当前可领取</span><strong>{fmt(available)}</strong><small>{!member ? "加入社区后开始释放" : member.lastClaimAt && !claimReady ? `下次可领取：${date(member.lastClaimAt + 24 * 60 * 60)}` : `累计已领取 ${fmt(member.claimed)}`}</small></div><button disabled={busy || !cfg || !claimReady} onClick={claim}>Claim {available > 0n ? fmt(available) : ""}</button></article>
+      <article className="wide"><Recycle aria-hidden /><h2>治理权回流奖励</h2><p>提案费用与结算回收的 CVOTE 平均记入当时所有社区成员，可再次用于投票；这不是资产收益或现金分红。</p><div className="reward-grid"><div className="balance"><span>我的可领取奖励</span><strong>{fmt(rewardAvailable)}</strong><small>{member ? `个人累计已领 ${fmt(rewardReceipt?.claimed ?? 0n)}` : "加入社区后参与后续回流分配"}</small></div><div className="balance"><span>社区累计回流</span><strong>{fmt(rewardState?.totalRecovered ?? cfg?.recovered ?? 0n)}</strong><small>{rewardState ? `${rewardState.memberCount.toString()} 个成员共享 · 已领取 ${fmt(rewardState.totalClaimed)}` : "奖励机制尚未初始化"}</small></div></div><button disabled={busy || !member || !rewardState || rewardAvailable === 0n} onClick={claimGovernanceReward}>领取治理权奖励 {rewardAvailable > 0n ? fmt(rewardAvailable) : ""}</button></article>
       <article className="wide"><ShieldCheck aria-hidden /><h2>发起提案</h2><p>写下明确的表决事项。每次发起消耗 10 CVOTE 并转回社区 treasury，提案开放投票 7 天。</p><div className="create-form"><label htmlFor="proposal-content">投票内容<textarea id="proposal-content" value={proposalContent} onChange={event => setProposalContent(event.target.value)} maxLength={80} placeholder="例如：是否将下一轮社区活动主题定为公共物品？" /><small className={contentBytes > 160 ? "error" : ""}>{contentBytes}/160 UTF-8 字节 · 钱包余额 {fmt(tokenBalance)}</small></label><button disabled={busy || !canCreate} onClick={create}>支付 10 CVOTE 并创建</button></div>{wallet.publicKey && tokenBalance < PROPOSAL_FEE && <p className="empty" role="status">余额不足：需要至少 10 CVOTE 才能发起提案。</p>}</article>
       <article className="wide"><Vote aria-hidden /><h2>社区提案</h2><p>这里自动加载全部链上提案，每次投票至少投入 0.01 CVOTE。</p>{proposals.length ? proposals.map(view => <section className="proposal-card" aria-live="polite" key={view.address.toBase58()}><div className="proposal-heading"><div><span className="state">{proposalStatus(view.state)}</span><h3>{view.state.content}</h3></div><time dateTime={new Date(view.state.endAt * 1000).toISOString()}>截止：{date(view.state.endAt)}</time></div><div className="tally"><div><span>赞成</span><strong>{fmt(view.state.yes)}</strong></div><div><span>反对</span><strong>{fmt(view.state.no)}</strong></div></div><div className="vote-actions"><label>投票数量<input type="number" min="0.01" step="0.01" value={amount} aria-invalid={!validVoteAmount} onChange={event => setAmount(event.target.value)} /><small className={!validVoteAmount ? "error" : ""}>{validVoteAmount ? "最低 0.01 CVOTE" : "请输入不少于 0.01 CVOTE 的数量"}</small></label><button disabled={busy || !validVoteAmount || view.state.settled || now >= view.state.endAt} onClick={() => cast(view, 0)}>投赞成</button><button className="secondary" disabled={busy || !validVoteAmount || view.state.settled || now >= view.state.endAt} onClick={() => cast(view, 1)}>投反对</button><button className="ghost" disabled={busy || view.state.settled || now < view.state.endAt} onClick={() => settle(view)}>结算并回收</button></div></section>) : <p className="empty">当前还没有提案，连接钱包后可以发起第一个。</p>}</article>
     </section>

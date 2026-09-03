@@ -30,10 +30,14 @@ const LEGACY_PROPOSAL_LEN: usize = 120;
 const PROPOSAL_LEN: usize = 280;
 const MAX_PROPOSAL_CONTENT_LEN: usize = 160;
 const RECEIPT_LEN: usize = 56;
+const REWARD_STATE_LEN: usize = 64;
+const REWARD_RECEIPT_LEN: usize = 56;
 const CONFIG_DISC: u8 = 1;
 const MEMBER_DISC: u8 = 2;
 const PROPOSAL_DISC: u8 = 3;
 const RECEIPT_DISC: u8 = 4;
+const REWARD_STATE_DISC: u8 = 5;
+const REWARD_RECEIPT_DISC: u8 = 6;
 const ALLOCATION: u64 = 1_000_000_000; // 1,000 tokens at 6 decimals.
 const VESTING_SECONDS: i64 = 365 * 24 * 60 * 60;
 const CLAIM_INTERVAL: i64 = 24 * 60 * 60;
@@ -75,6 +79,8 @@ fn process_instruction(program_id: &Pubkey, a: &[AccountInfo], data: &[u8]) -> P
         3 => create_proposal(a, d),
         4 => vote(a, d),
         5 => settle(a, d),
+        6 => initialize_rewards(a, d),
+        7 => claim_reward(a, d),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -148,21 +154,29 @@ fn initialize(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
 }
 
 fn join(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
-    if a.len() != 4 || !d.is_empty() {
+    if a.len() != 6 || !d.is_empty() {
         return Err(VoteError::InvalidAccounts.into());
     }
-    let (user, member, config, sp) = (&a[0], &a[1], &a[2], &a[3]);
+    let (user, member, reward_receipt, config, reward_state, sp) =
+        (&a[0], &a[1], &a[2], &a[3], &a[4], &a[5]);
     if !user.is_signer()
         || !user.is_writable()
         || !member.is_writable()
+        || !reward_receipt.is_writable()
         || !config.is_writable()
+        || !reward_state.is_writable()
         || sp.key() != &pinocchio_system::ID
     {
         return Err(VoteError::InvalidAccounts.into());
     }
     let cb = validate_config(config)?;
+    validate_reward_state(reward_state)?;
     let (expected, bump) = find_program_address(&[b"member", user.key()], &ID);
     if member.key() != &expected {
+        return Err(VoteError::InvalidPda.into());
+    }
+    let (expected_reward, reward_bump) = find_program_address(&[b"reward", user.key()], &ID);
+    if reward_receipt.key() != &expected_reward || reward_receipt.data_len() != 0 {
         return Err(VoteError::InvalidPda.into());
     }
     let mut allocated = {
@@ -201,6 +215,38 @@ fn join(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         md[8..40].copy_from_slice(user.key());
         md[40..48].copy_from_slice(&now.to_le_bytes());
         md[56..64].copy_from_slice(&ALLOCATION.to_le_bytes());
+    }
+    let reward_bump_seed = [reward_bump];
+    let reward_seeds = [
+        Seed::from(b"reward"),
+        Seed::from(user.key()),
+        Seed::from(&reward_bump_seed),
+    ];
+    CreateAccount {
+        from: user,
+        to: reward_receipt,
+        lamports: rent_lamports(REWARD_RECEIPT_LEN)?,
+        space: REWARD_RECEIPT_LEN as u64,
+        owner: &ID,
+    }
+    .invoke_signed(&[Signer::from(&reward_seeds)])?;
+    let current_index = {
+        let rd = reward_state.try_borrow_data()?;
+        read_u64(&rd[16..24])
+    };
+    {
+        let mut receipt_data = reward_receipt.try_borrow_mut_data()?;
+        receipt_data[0] = REWARD_RECEIPT_DISC;
+        receipt_data[1] = reward_bump;
+        receipt_data[8..40].copy_from_slice(user.key());
+        receipt_data[40..48].copy_from_slice(&current_index.to_le_bytes());
+    }
+    {
+        let mut reward_data = reward_state.try_borrow_mut_data()?;
+        let member_count = read_u64(&reward_data[8..16])
+            .checked_add(1)
+            .ok_or(VoteError::MathOverflow)?;
+        reward_data[8..16].copy_from_slice(&member_count.to_le_bytes());
     }
     let mut cd = config.try_borrow_mut_data()?;
     cd[80..88].copy_from_slice(&allocated.to_le_bytes());
@@ -280,14 +326,17 @@ fn claim(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
 }
 
 fn create_proposal(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
-    if a.len() != 8 || d.len() < 10 {
+    if a.len() != 9 || d.len() < 10 {
         return Err(VoteError::InvalidAccounts.into());
     }
-    let (creator, proposal, vault, config, source, treasury, sp, tp) =
-        (&a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7]);
+    let (creator, proposal, vault, config, reward_state, source, treasury, sp, tp) = (
+        &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7], &a[8],
+    );
     if !creator.is_signer()
         || !creator.is_writable()
         || !proposal.is_writable()
+        || !config.is_writable()
+        || !reward_state.is_writable()
         || !source.is_writable()
         || !treasury.is_writable()
         || sp.key() != &pinocchio_system::ID
@@ -296,6 +345,7 @@ fn create_proposal(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         return Err(VoteError::InvalidAccounts.into());
     }
     validate_config(config)?;
+    validate_reward_state(reward_state)?;
     let nonce_bytes = &d[..8];
     let nonce = read_u64(nonce_bytes);
     let content_len = u16::from_le_bytes([d[8], d[9]]) as usize;
@@ -335,6 +385,7 @@ fn create_proposal(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         amount: PROPOSAL_FEE,
     }
     .invoke()?;
+    record_recovery(config, reward_state, PROPOSAL_FEE)?;
     let bs = [bump];
     let seeds = [
         Seed::from(b"proposal"),
@@ -479,19 +530,22 @@ fn validate_vote_input(option: u8, amount: u64) -> ProgramResult {
 }
 
 fn settle(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
-    if a.len() != 5 || !d.is_empty() {
+    if a.len() != 6 || !d.is_empty() {
         return Err(VoteError::InvalidAccounts.into());
     }
-    let (proposal, vault, config, treasury, tp) = (&a[0], &a[1], &a[2], &a[3], &a[4]);
+    let (proposal, vault, config, reward_state, treasury, tp) =
+        (&a[0], &a[1], &a[2], &a[3], &a[4], &a[5]);
     if !proposal.is_writable()
         || !vault.is_writable()
         || !config.is_writable()
+        || !reward_state.is_writable()
         || !treasury.is_writable()
         || tp.key() != &pinocchio_token::ID
     {
         return Err(VoteError::InvalidAccounts.into());
     }
     let cb = validate_config(config)?;
+    validate_reward_state(reward_state)?;
     let (bump, creator, nonce, end, settled, deposited, pvault) = {
         let pd = proposal.try_borrow_data()?;
         if proposal.owner() != &ID
@@ -539,13 +593,7 @@ fn settle(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         amount: deposited,
     }
     .invoke_signed(&[Signer::from(&seeds)])?;
-    {
-        let mut cd = config.try_borrow_mut_data()?;
-        let recovered = read_u64(&cd[88..96])
-            .checked_add(deposited)
-            .ok_or(VoteError::MathOverflow)?;
-        cd[88..96].copy_from_slice(&recovered.to_le_bytes());
-    }
+    record_recovery(config, reward_state, deposited)?;
     let mut pd = proposal.try_borrow_mut_data()?;
     pd[2] = 1;
     pd[3] = if read_u64(&pd[48..56]) >= read_u64(&pd[56..64]) {
@@ -555,6 +603,222 @@ fn settle(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
     };
     let _ = cb;
     Ok(())
+}
+
+fn initialize_rewards(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
+    if a.len() != 4 || !d.is_empty() {
+        return Err(VoteError::InvalidAccounts.into());
+    }
+    let (payer, reward_state, config, sp) = (&a[0], &a[1], &a[2], &a[3]);
+    if !payer.is_signer()
+        || !payer.is_writable()
+        || !reward_state.is_writable()
+        || sp.key() != &pinocchio_system::ID
+    {
+        return Err(VoteError::InvalidAccounts.into());
+    }
+    validate_config(config)?;
+    let (expected, bump) = find_program_address(&[b"rewards"], &ID);
+    if reward_state.key() != &expected || reward_state.data_len() != 0 {
+        return Err(VoteError::InvalidPda.into());
+    }
+    let (allocated, recovered) = {
+        let cd = config.try_borrow_data()?;
+        (read_u64(&cd[80..88]), read_u64(&cd[88..96]))
+    };
+    if allocated % ALLOCATION != 0 {
+        return Err(VoteError::InvalidState.into());
+    }
+    let member_count = allocated / ALLOCATION;
+    let bump_seed = [bump];
+    let seeds = [Seed::from(b"rewards"), Seed::from(&bump_seed)];
+    CreateAccount {
+        from: payer,
+        to: reward_state,
+        lamports: rent_lamports(REWARD_STATE_LEN)?,
+        space: REWARD_STATE_LEN as u64,
+        owner: &ID,
+    }
+    .invoke_signed(&[Signer::from(&seeds)])?;
+    let mut rd = reward_state.try_borrow_mut_data()?;
+    rd[0] = REWARD_STATE_DISC;
+    rd[1] = bump;
+    rd[8..16].copy_from_slice(&member_count.to_le_bytes());
+    let (reward_index, carry) = distribute_reward(0, 0, recovered, member_count)?;
+    rd[16..24].copy_from_slice(&reward_index.to_le_bytes());
+    rd[24..32].copy_from_slice(&carry.to_le_bytes());
+    rd[32..40].copy_from_slice(&recovered.to_le_bytes());
+    Ok(())
+}
+
+fn claim_reward(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
+    if a.len() != 9 || !d.is_empty() {
+        return Err(VoteError::InvalidAccounts.into());
+    }
+    let (user, member, receipt, reward_state, config, treasury, dest, tp, sp) = (
+        &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7], &a[8],
+    );
+    if !user.is_signer()
+        || !user.is_writable()
+        || !receipt.is_writable()
+        || !reward_state.is_writable()
+        || !treasury.is_writable()
+        || !dest.is_writable()
+        || tp.key() != &pinocchio_token::ID
+        || sp.key() != &pinocchio_system::ID
+    {
+        return Err(VoteError::InvalidAccounts.into());
+    }
+    let cb = validate_config(config)?;
+    validate_reward_state(reward_state)?;
+    {
+        let md = member.try_borrow_data()?;
+        if member.owner() != &ID
+            || md.len() != MEMBER_LEN
+            || md[0] != MEMBER_DISC
+            || user.key().as_ref() != &md[8..40]
+        {
+            return Err(VoteError::InvalidState.into());
+        }
+    }
+    let (expected, bump) = find_program_address(&[b"reward", user.key()], &ID);
+    if receipt.key() != &expected {
+        return Err(VoteError::InvalidPda.into());
+    }
+    if receipt.data_len() == 0 {
+        let bump_seed = [bump];
+        let seeds = [
+            Seed::from(b"reward"),
+            Seed::from(user.key()),
+            Seed::from(&bump_seed),
+        ];
+        CreateAccount {
+            from: user,
+            to: receipt,
+            lamports: rent_lamports(REWARD_RECEIPT_LEN)?,
+            space: REWARD_RECEIPT_LEN as u64,
+            owner: &ID,
+        }
+        .invoke_signed(&[Signer::from(&seeds)])?;
+        let mut receipt_data = receipt.try_borrow_mut_data()?;
+        receipt_data[0] = REWARD_RECEIPT_DISC;
+        receipt_data[1] = bump;
+        receipt_data[8..40].copy_from_slice(user.key());
+    }
+    let reward_index = {
+        let rd = reward_state.try_borrow_data()?;
+        read_u64(&rd[16..24])
+    };
+    let (debt, claimed) = {
+        let receipt_data = receipt.try_borrow_data()?;
+        if receipt.owner() != &ID
+            || receipt_data.len() != REWARD_RECEIPT_LEN
+            || receipt_data[0] != REWARD_RECEIPT_DISC
+            || user.key().as_ref() != &receipt_data[8..40]
+        {
+            return Err(VoteError::InvalidState.into());
+        }
+        (
+            read_u64(&receipt_data[40..48]),
+            read_u64(&receipt_data[48..56]),
+        )
+    };
+    let amount = reward_index
+        .checked_sub(debt)
+        .ok_or(VoteError::MathOverflow)?;
+    if amount == 0 {
+        return Err(VoteError::InvalidAmount.into());
+    }
+    let cd = config.try_borrow_data()?;
+    let mint = &cd[8..40];
+    if treasury.key().as_ref() != &cd[40..72] {
+        return Err(VoteError::InvalidMint.into());
+    }
+    let source = TokenAccount::from_account_info(treasury)?;
+    let destination = TokenAccount::from_account_info(dest)?;
+    if source.owner() != config.key()
+        || source.mint() != mint
+        || destination.owner() != user.key()
+        || destination.mint() != mint
+    {
+        return Err(VoteError::InvalidMint.into());
+    }
+    drop(cd);
+    let bump_seed = [cb];
+    let seeds = [Seed::from(b"config"), Seed::from(&bump_seed)];
+    Transfer {
+        from: treasury,
+        to: dest,
+        authority: config,
+        amount,
+    }
+    .invoke_signed(&[Signer::from(&seeds)])?;
+    {
+        let mut receipt_data = receipt.try_borrow_mut_data()?;
+        receipt_data[40..48].copy_from_slice(&reward_index.to_le_bytes());
+        let total = claimed.checked_add(amount).ok_or(VoteError::MathOverflow)?;
+        receipt_data[48..56].copy_from_slice(&total.to_le_bytes());
+    }
+    let mut reward_data = reward_state.try_borrow_mut_data()?;
+    let total_claimed = read_u64(&reward_data[40..48])
+        .checked_add(amount)
+        .ok_or(VoteError::MathOverflow)?;
+    reward_data[40..48].copy_from_slice(&total_claimed.to_le_bytes());
+    Ok(())
+}
+
+fn record_recovery(config: &AccountInfo, reward_state: &AccountInfo, amount: u64) -> ProgramResult {
+    {
+        let mut cd = config.try_borrow_mut_data()?;
+        let recovered = read_u64(&cd[88..96])
+            .checked_add(amount)
+            .ok_or(VoteError::MathOverflow)?;
+        cd[88..96].copy_from_slice(&recovered.to_le_bytes());
+    }
+    let mut rd = reward_state.try_borrow_mut_data()?;
+    let members = read_u64(&rd[8..16]);
+    let index = read_u64(&rd[16..24]);
+    let carry = read_u64(&rd[24..32]);
+    let total = read_u64(&rd[32..40])
+        .checked_add(amount)
+        .ok_or(VoteError::MathOverflow)?;
+    let (next_index, next_carry) = distribute_reward(index, carry, amount, members)?;
+    rd[16..24].copy_from_slice(&next_index.to_le_bytes());
+    rd[24..32].copy_from_slice(&next_carry.to_le_bytes());
+    rd[32..40].copy_from_slice(&total.to_le_bytes());
+    Ok(())
+}
+
+fn distribute_reward(
+    index: u64,
+    carry: u64,
+    amount: u64,
+    members: u64,
+) -> Result<(u64, u64), ProgramError> {
+    let pool = carry.checked_add(amount).ok_or(VoteError::MathOverflow)?;
+    if members == 0 {
+        return Ok((index, pool));
+    }
+    let per_member = pool / members;
+    let next_index = index
+        .checked_add(per_member)
+        .ok_or(VoteError::MathOverflow)?;
+    Ok((next_index, pool % members))
+}
+
+fn validate_reward_state(reward_state: &AccountInfo) -> Result<u8, ProgramError> {
+    if reward_state.owner() != &ID || reward_state.data_len() != REWARD_STATE_LEN {
+        return Err(VoteError::InvalidState.into());
+    }
+    let data = reward_state.try_borrow_data()?;
+    if data[0] != REWARD_STATE_DISC {
+        return Err(VoteError::InvalidState.into());
+    }
+    let (expected, _) = find_program_address(&[b"rewards"], &ID);
+    if reward_state.key() != &expected {
+        return Err(VoteError::InvalidPda.into());
+    }
+    Ok(data[1])
 }
 
 fn validate_config(c: &AccountInfo) -> Result<u8, ProgramError> {
@@ -592,6 +856,8 @@ mod tests {
         assert_eq!(PROPOSAL_LEN, 280);
         assert_eq!(PROPOSAL_FEE, 10_000_000);
         assert_eq!(MIN_VOTE_AMOUNT, 10_000);
+        assert_eq!(REWARD_STATE_LEN, 64);
+        assert_eq!(REWARD_RECEIPT_LEN, 56);
     }
     #[test]
     fn linear_math() {
@@ -609,5 +875,18 @@ mod tests {
             validate_vote_input(2, MIN_VOTE_AMOUNT),
             Err(ProgramError::Custom(11))
         ));
+    }
+    #[test]
+    fn equal_reward_distribution_carries_dust() {
+        let (index, carry) = distribute_reward(0, 0, 1_000_000_001, 100).unwrap();
+        assert_eq!(index, 10_000_000);
+        assert_eq!(carry, 1);
+        let (index, carry) = distribute_reward(index, carry, 99, 100).unwrap();
+        assert_eq!(index, 10_000_001);
+        assert_eq!(carry, 0);
+    }
+    #[test]
+    fn rewards_wait_when_there_are_no_members() {
+        assert_eq!(distribute_reward(7, 3, 10, 0).unwrap(), (7, 13));
     }
 }
