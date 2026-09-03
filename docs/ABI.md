@@ -17,10 +17,10 @@ Program ID: `BvTUyzWLwyoX47bXndjupDzzbtHBFGNWUsZhwsFNkTXe`. 所有整数均为 l
 | 1 Join | 无 | user(s,w), member(w), config(w), System Program |
 | 2 Claim | 无 | user(s), member(w), config, treasury(w), user token(w), Token Program |
 | 3 CreateProposal | `nonce:u64,content_len:u16,content_utf8[content_len]`；内容 1–160 UTF-8 bytes | creator(s,w), proposal(w), proposal vault, config, creator token account(w), treasury(w), System Program, Token Program |
-| 4 Vote | `option:u8 (0=yes,1=no),amount:u64` | voter(s,w), proposal(w), receipt(w), voter token(w), proposal vault(w), config, System Program, Token Program |
+| 4 Vote | `option:u8 (0=yes,1=no),amount:u64`；`amount >= 10_000` base units（0.01 CVOTE） | voter(s,w), proposal(w), receipt(w), voter token(w), proposal vault(w), config, System Program, Token Program |
 | 5 Settle | 无 | proposal(w), proposal vault(w), config(w), treasury(w), Token Program |
 
-Initialize 铸造全部供应到 treasury 后立即撤销 mint authority；Join 每钱包仅能初始化一次并预留 1,000 Token；Claim 按 `min(elapsed,365d)/365d` 线性释放且间隔至少 24h；CreateProposal 从创建者的同 Mint Token Account 转账 `10_000_000` base units（10 CVOTE）到 config 中记录的 treasury；Proposal 固定 7 天；同一钱包只可选择一个方向但可追加；任何人可在到期后结算，全部投票 Token 回到 treasury。
+Initialize 铸造全部供应到 treasury 后立即撤销 mint authority；Join 每钱包仅能初始化一次并预留 1,000 Token；Claim 按 `min(elapsed,365d)/365d` 线性释放且间隔至少 24h；CreateProposal 从创建者的同 Mint Token Account 转账 `10_000_000` base units（10 CVOTE）到 config 中记录的 treasury；Proposal 固定 7 天；每次 Vote 至少 `10_000` base units（0.01 CVOTE），同一钱包只可选择一个方向但可追加；任何人可在到期后结算，全部投票 Token 回到 treasury。
 
 ## 错误码
 
