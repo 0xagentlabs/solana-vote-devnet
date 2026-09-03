@@ -39,6 +39,7 @@ const VESTING_SECONDS: i64 = 365 * 24 * 60 * 60;
 const CLAIM_INTERVAL: i64 = 24 * 60 * 60;
 const PROPOSAL_SECONDS: i64 = 7 * 24 * 60 * 60;
 const PROPOSAL_FEE: u64 = 10_000_000; // 10 tokens at 6 decimals, returned to treasury.
+const MIN_VOTE_AMOUNT: u64 = 10_000; // 0.01 tokens at 6 decimals.
 
 #[repr(u32)]
 enum VoteError {
@@ -371,9 +372,7 @@ fn vote(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
     }
     let option = d[0];
     let amount = read_u64(&d[1..]);
-    if option > 1 || amount == 0 {
-        return Err(VoteError::InvalidOption.into());
-    }
+    validate_vote_input(option, amount)?;
     let (voter, proposal, receipt, source, vault, config, sp, tp) =
         (&a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7]);
     if !voter.is_signer()
@@ -466,6 +465,16 @@ fn vote(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         .ok_or(VoteError::MathOverflow)?;
     pd[64..72].copy_from_slice(&dep.to_le_bytes());
     pd[1] = pb;
+    Ok(())
+}
+
+fn validate_vote_input(option: u8, amount: u64) -> ProgramResult {
+    if option > 1 {
+        return Err(VoteError::InvalidOption.into());
+    }
+    if amount < MIN_VOTE_AMOUNT {
+        return Err(VoteError::InvalidAmount.into());
+    }
     Ok(())
 }
 
@@ -582,10 +591,23 @@ mod tests {
         assert_eq!(PROPOSAL_SECONDS, 604_800);
         assert_eq!(PROPOSAL_LEN, 280);
         assert_eq!(PROPOSAL_FEE, 10_000_000);
+        assert_eq!(MIN_VOTE_AMOUNT, 10_000);
     }
     #[test]
     fn linear_math() {
         let vested = ALLOCATION as u128 * 15_768_000u128 / VESTING_SECONDS as u128;
         assert_eq!(vested, 500_000_000);
+    }
+    #[test]
+    fn vote_amount_boundary() {
+        assert!(validate_vote_input(0, MIN_VOTE_AMOUNT).is_ok());
+        assert!(matches!(
+            validate_vote_input(1, MIN_VOTE_AMOUNT - 1),
+            Err(ProgramError::Custom(5))
+        ));
+        assert!(matches!(
+            validate_vote_input(2, MIN_VOTE_AMOUNT),
+            Err(ProgramError::Custom(11))
+        ));
     }
 }
