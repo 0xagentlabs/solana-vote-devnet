@@ -26,7 +26,9 @@ pub const ID: Pubkey = [
 ];
 const CONFIG_LEN: usize = 96;
 const MEMBER_LEN: usize = 80;
-const PROPOSAL_LEN: usize = 120;
+const LEGACY_PROPOSAL_LEN: usize = 120;
+const PROPOSAL_LEN: usize = 280;
+const MAX_PROPOSAL_CONTENT_LEN: usize = 160;
 const RECEIPT_LEN: usize = 56;
 const CONFIG_DISC: u8 = 1;
 const MEMBER_DISC: u8 = 2;
@@ -276,7 +278,7 @@ fn claim(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
 }
 
 fn create_proposal(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
-    if a.len() != 5 || d.len() != 8 {
+    if a.len() != 5 || d.len() < 10 {
         return Err(VoteError::InvalidAccounts.into());
     }
     let (creator, proposal, vault, config, sp) = (&a[0], &a[1], &a[2], &a[3], &a[4]);
@@ -288,8 +290,17 @@ fn create_proposal(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         return Err(VoteError::InvalidAccounts.into());
     }
     validate_config(config)?;
-    let nonce = read_u64(d);
-    let (expected, bump) = find_program_address(&[b"proposal", creator.key(), d], &ID);
+    let nonce_bytes = &d[..8];
+    let nonce = read_u64(nonce_bytes);
+    let content_len = u16::from_le_bytes([d[8], d[9]]) as usize;
+    if content_len == 0
+        || content_len > MAX_PROPOSAL_CONTENT_LEN
+        || d.len() != 10 + content_len
+        || core::str::from_utf8(&d[10..]).is_err()
+    {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let (expected, bump) = find_program_address(&[b"proposal", creator.key(), nonce_bytes], &ID);
     if proposal.key() != &expected {
         return Err(VoteError::InvalidPda.into());
     }
@@ -304,7 +315,7 @@ fn create_proposal(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
     let seeds = [
         Seed::from(b"proposal"),
         Seed::from(creator.key()),
-        Seed::from(d),
+        Seed::from(nonce_bytes),
         Seed::from(&bs),
     ];
     CreateAccount {
@@ -326,6 +337,8 @@ fn create_proposal(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
     pd[40..48].copy_from_slice(&end.to_le_bytes());
     pd[72..80].copy_from_slice(&nonce.to_le_bytes());
     pd[80..112].copy_from_slice(vault.key());
+    pd[112..114].copy_from_slice(&(content_len as u16).to_le_bytes());
+    pd[114..114 + content_len].copy_from_slice(&d[10..]);
     Ok(())
 }
 
@@ -354,7 +367,10 @@ fn vote(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
     validate_config(config)?;
     let (pb, end, settled, pvault) = {
         let pd = proposal.try_borrow_data()?;
-        if proposal.owner() != &ID || pd.len() != PROPOSAL_LEN || pd[0] != PROPOSAL_DISC {
+        if proposal.owner() != &ID
+            || (pd.len() != LEGACY_PROPOSAL_LEN && pd.len() != PROPOSAL_LEN)
+            || pd[0] != PROPOSAL_DISC
+        {
             return Err(VoteError::InvalidState.into());
         }
         (
@@ -446,7 +462,10 @@ fn settle(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
     let cb = validate_config(config)?;
     let (bump, creator, nonce, end, settled, deposited, pvault) = {
         let pd = proposal.try_borrow_data()?;
-        if proposal.owner() != &ID || pd[0] != PROPOSAL_DISC {
+        if proposal.owner() != &ID
+            || (pd.len() != LEGACY_PROPOSAL_LEN && pd.len() != PROPOSAL_LEN)
+            || pd[0] != PROPOSAL_DISC
+        {
             return Err(VoteError::InvalidState.into());
         }
         (
@@ -538,6 +557,7 @@ mod tests {
         assert_eq!(ALLOCATION, 1_000_000_000);
         assert_eq!(VESTING_SECONDS, 31_536_000);
         assert_eq!(PROPOSAL_SECONDS, 604_800);
+        assert_eq!(PROPOSAL_LEN, 280);
     }
     #[test]
     fn linear_math() {
