@@ -18,11 +18,10 @@ Program ID: `BvTUyzWLwyoX47bXndjupDzzbtHBFGNWUsZhwsFNkTXe`. 所有整数均为 l
 | 2 Claim | 无 | user(s), member(w), config, treasury(w), user token(w), Token Program |
 | 3 CreateProposal | `nonce:u64` | creator(s,w), proposal(w), proposal vault, config, System Program |
 | 4 Vote | `option:u8 (0=yes,1=no),amount:u64` | voter(s,w), proposal(w), receipt(w), voter token(w), proposal vault(w), config, System Program, Token Program |
-| 5 Settle | 无 | proposal(w), proposal vault(w), config, treasury(w), Token Program |
+| 5 Settle | 无 | proposal(w), proposal vault(w), config(w), treasury(w), Token Program |
 
 Initialize 铸造全部供应到 treasury 后立即撤销 mint authority；Join 每钱包仅能初始化一次并预留 1,000 Token；Claim 按 `min(elapsed,365d)/365d` 线性释放且间隔至少 24h；Proposal 固定 7 天；同一钱包只可选择一个方向但可追加；任何人可在到期后结算，全部投票 Token 回到 treasury。
 
 ## 错误码
 
 `1 InvalidAccounts`, `2 InvalidPda`, `3 InvalidState`, `4 InvalidMint`, `5 InvalidAmount`, `6 MathOverflow`, `7 TooEarly`, `8 VotingClosed`, `9 AlreadySettled`, `10 AllocationExhausted`, `11 InvalidOption`。
-

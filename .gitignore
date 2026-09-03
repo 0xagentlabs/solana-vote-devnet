@@ -10,3 +10,4 @@ vote-program-keypair.json
 .multica/
 AGENTS.md
 *.tsbuildinfo
+.vercel

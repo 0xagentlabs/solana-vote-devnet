@@ -80,7 +80,14 @@ fn initialize(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         return Err(VoteError::InvalidAccounts.into());
     }
     let (payer, config, mint, treasury, tp, sp) = (&a[0], &a[1], &a[2], &a[3], &a[4], &a[5]);
-    if !payer.is_signer() || tp.key() != &pinocchio_token::ID || sp.key() != &pinocchio_system::ID {
+    if !payer.is_signer()
+        || !payer.is_writable()
+        || !config.is_writable()
+        || !mint.is_writable()
+        || !treasury.is_writable()
+        || tp.key() != &pinocchio_token::ID
+        || sp.key() != &pinocchio_system::ID
+    {
         return Err(VoteError::InvalidAccounts.into());
     }
     let (expected, bump) = find_program_address(&[b"config"], &ID);
@@ -141,7 +148,12 @@ fn join(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         return Err(VoteError::InvalidAccounts.into());
     }
     let (user, member, config, sp) = (&a[0], &a[1], &a[2], &a[3]);
-    if !user.is_signer() || sp.key() != &pinocchio_system::ID {
+    if !user.is_signer()
+        || !user.is_writable()
+        || !member.is_writable()
+        || !config.is_writable()
+        || sp.key() != &pinocchio_system::ID
+    {
         return Err(VoteError::InvalidAccounts.into());
     }
     let cb = validate_config(config)?;
@@ -197,7 +209,12 @@ fn claim(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         return Err(VoteError::InvalidAccounts.into());
     }
     let (user, member, config, treasury, dest, tp) = (&a[0], &a[1], &a[2], &a[3], &a[4], &a[5]);
-    if !user.is_signer() || tp.key() != &pinocchio_token::ID {
+    if !user.is_signer()
+        || !member.is_writable()
+        || !treasury.is_writable()
+        || !dest.is_writable()
+        || tp.key() != &pinocchio_token::ID
+    {
         return Err(VoteError::InvalidAccounts.into());
     }
     let cb = validate_config(config)?;
@@ -263,7 +280,11 @@ fn create_proposal(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         return Err(VoteError::InvalidAccounts.into());
     }
     let (creator, proposal, vault, config, sp) = (&a[0], &a[1], &a[2], &a[3], &a[4]);
-    if !creator.is_signer() || sp.key() != &pinocchio_system::ID {
+    if !creator.is_signer()
+        || !creator.is_writable()
+        || !proposal.is_writable()
+        || sp.key() != &pinocchio_system::ID
+    {
         return Err(VoteError::InvalidAccounts.into());
     }
     validate_config(config)?;
@@ -319,7 +340,15 @@ fn vote(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
     }
     let (voter, proposal, receipt, source, vault, config, sp, tp) =
         (&a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7]);
-    if !voter.is_signer() || sp.key() != &pinocchio_system::ID || tp.key() != &pinocchio_token::ID {
+    if !voter.is_signer()
+        || !voter.is_writable()
+        || !proposal.is_writable()
+        || !receipt.is_writable()
+        || !source.is_writable()
+        || !vault.is_writable()
+        || sp.key() != &pinocchio_system::ID
+        || tp.key() != &pinocchio_token::ID
+    {
         return Err(VoteError::InvalidAccounts.into());
     }
     validate_config(config)?;
@@ -406,7 +435,12 @@ fn settle(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         return Err(VoteError::InvalidAccounts.into());
     }
     let (proposal, vault, config, treasury, tp) = (&a[0], &a[1], &a[2], &a[3], &a[4]);
-    if tp.key() != &pinocchio_token::ID {
+    if !proposal.is_writable()
+        || !vault.is_writable()
+        || !config.is_writable()
+        || !treasury.is_writable()
+        || tp.key() != &pinocchio_token::ID
+    {
         return Err(VoteError::InvalidAccounts.into());
     }
     let cb = validate_config(config)?;
@@ -454,6 +488,13 @@ fn settle(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
         amount: deposited,
     }
     .invoke_signed(&[Signer::from(&seeds)])?;
+    {
+        let mut cd = config.try_borrow_mut_data()?;
+        let recovered = read_u64(&cd[88..96])
+            .checked_add(deposited)
+            .ok_or(VoteError::MathOverflow)?;
+        cd[88..96].copy_from_slice(&recovered.to_le_bytes());
+    }
     let mut pd = proposal.try_borrow_mut_data()?;
     pd[2] = 1;
     pd[3] = if read_u64(&pd[48..56]) >= read_u64(&pd[56..64]) {
