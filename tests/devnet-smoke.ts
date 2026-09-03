@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { Connection, Keypair, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
 import { createAssociatedTokenAccountInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { CONFIG, PROGRAM_ID, PROPOSAL_FEE, claimIx, createProposalIx, joinIx, memberPda, parseConfig, proposalPda } from "../lib/vote";
+import { CONFIG, PROGRAM_ID, PROPOSAL_FEE, REWARD_STATE, claimIx, claimRewardIx, createProposalIx, joinIx, memberPda, parseConfig, parseRewardReceipt, parseRewardState, proposalPda, rewardClaimable, rewardReceiptPda } from "../lib/vote";
 
 async function main() {
   const connection = new Connection("https://api.devnet.solana.com", "confirmed");
@@ -12,6 +12,10 @@ async function main() {
   assert(configAccount);
   const config = parseConfig(configAccount.data);
   assert.equal(config.total, 1_000_000_000_000n);
+  const rewardStateAccount = await connection.getAccountInfo(REWARD_STATE);
+  assert(rewardStateAccount, "RewardState must be initialized after the program upgrade");
+  const rewardState = parseRewardState(rewardStateAccount.data);
+  assert(rewardState.memberCount > 0n);
   const member = memberPda(payer.publicKey);
   let joinSignature: string | undefined;
   if (!await connection.getAccountInfo(member)) joinSignature = await sendAndConfirmTransaction(connection, new Transaction().add(joinIx(payer.publicKey)), [payer], { commitment: "confirmed" });
@@ -22,6 +26,17 @@ async function main() {
   if (!await connection.getAccountInfo(ata)) claim.add(createAssociatedTokenAccountInstruction(payer.publicKey, ata, payer.publicKey, config.mint));
   claim.add(claimIx(payer.publicKey, config.treasury, ata));
   assert.equal((await connection.simulateTransaction(claim, [payer])).value.err, null);
+
+  const rewardReceiptAccount = await connection.getAccountInfo(rewardReceiptPda(payer.publicKey));
+  const rewardReceipt = rewardReceiptAccount ? parseRewardReceipt(rewardReceiptAccount.data) : undefined;
+  const rewardAvailable = rewardClaimable(rewardState, rewardReceipt);
+  if (rewardAvailable > 0n) {
+    const reward = new Transaction();
+    if (!await connection.getAccountInfo(ata)) reward.add(createAssociatedTokenAccountInstruction(payer.publicKey, ata, payer.publicKey, config.mint));
+    reward.add(claimRewardIx(payer.publicKey, config.treasury, ata));
+    const rewardSimulation = await connection.simulateTransaction(reward, [payer]);
+    assert.equal(rewardSimulation.value.err, null, JSON.stringify(rewardSimulation.value.logs));
+  }
 
   const nonce = BigInt(Date.now());
   const proposal = proposalPda(payer.publicKey, nonce);
@@ -34,7 +49,7 @@ async function main() {
   const createSimulation = await connection.simulateTransaction(create, [payer]);
   if (balance >= PROPOSAL_FEE) assert.equal(createSimulation.value.err, null, JSON.stringify(createSimulation.value.logs));
   else assert(createSimulation.value.err, "Insufficient-token proposal creation must fail");
-  console.log(JSON.stringify({ joinSignature, claimSimulation: "ok", proposalFee: PROPOSAL_FEE.toString(), walletBalance: balance.toString(), createSimulation: balance >= PROPOSAL_FEE ? "ok" : "correctly rejected: insufficient CVOTE" }));
+  console.log(JSON.stringify({ joinSignature, claimSimulation: "ok", rewardAvailable: rewardAvailable.toString(), rewardSimulation: rewardAvailable > 0n ? "ok" : "skipped: no accrued reward", proposalFee: PROPOSAL_FEE.toString(), walletBalance: balance.toString(), createSimulation: balance >= PROPOSAL_FEE ? "ok" : "correctly rejected: insufficient CVOTE" }));
 }
 
 main().catch(error => { console.error(error); process.exit(1); });
