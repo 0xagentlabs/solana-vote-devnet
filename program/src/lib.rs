@@ -38,6 +38,7 @@ const ALLOCATION: u64 = 1_000_000_000; // 1,000 tokens at 6 decimals.
 const VESTING_SECONDS: i64 = 365 * 24 * 60 * 60;
 const CLAIM_INTERVAL: i64 = 24 * 60 * 60;
 const PROPOSAL_SECONDS: i64 = 7 * 24 * 60 * 60;
+const PROPOSAL_FEE: u64 = 10_000_000; // 10 tokens at 6 decimals, returned to treasury.
 
 #[repr(u32)]
 enum VoteError {
@@ -278,14 +279,18 @@ fn claim(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
 }
 
 fn create_proposal(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
-    if a.len() != 5 || d.len() < 10 {
+    if a.len() != 8 || d.len() < 10 {
         return Err(VoteError::InvalidAccounts.into());
     }
-    let (creator, proposal, vault, config, sp) = (&a[0], &a[1], &a[2], &a[3], &a[4]);
+    let (creator, proposal, vault, config, source, treasury, sp, tp) =
+        (&a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7]);
     if !creator.is_signer()
         || !creator.is_writable()
         || !proposal.is_writable()
+        || !source.is_writable()
+        || !treasury.is_writable()
         || sp.key() != &pinocchio_system::ID
+        || tp.key() != &pinocchio_token::ID
     {
         return Err(VoteError::InvalidAccounts.into());
     }
@@ -306,11 +311,29 @@ fn create_proposal(a: &[AccountInfo], d: &[u8]) -> ProgramResult {
     }
     let cd = config.try_borrow_data()?;
     let mint = &cd[8..40];
+    if treasury.key().as_ref() != &cd[40..72] {
+        return Err(VoteError::InvalidMint.into());
+    }
     let vt = TokenAccount::from_account_info(vault)?;
-    if vt.owner() != proposal.key() || vt.mint() != mint {
+    let src = TokenAccount::from_account_info(source)?;
+    let dst = TokenAccount::from_account_info(treasury)?;
+    if vt.owner() != proposal.key()
+        || vt.mint() != mint
+        || src.owner() != creator.key()
+        || src.mint() != mint
+        || dst.owner() != config.key()
+        || dst.mint() != mint
+    {
         return Err(VoteError::InvalidMint.into());
     }
     drop(cd);
+    Transfer {
+        from: source,
+        to: treasury,
+        authority: creator,
+        amount: PROPOSAL_FEE,
+    }
+    .invoke()?;
     let bs = [bump];
     let seeds = [
         Seed::from(b"proposal"),
@@ -558,6 +581,7 @@ mod tests {
         assert_eq!(VESTING_SECONDS, 31_536_000);
         assert_eq!(PROPOSAL_SECONDS, 604_800);
         assert_eq!(PROPOSAL_LEN, 280);
+        assert_eq!(PROPOSAL_FEE, 10_000_000);
     }
     #[test]
     fn linear_math() {

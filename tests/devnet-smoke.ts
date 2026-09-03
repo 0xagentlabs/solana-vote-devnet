@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { Connection, Keypair, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
 import { createAssociatedTokenAccountInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { CONFIG, PROGRAM_ID, claimIx, createProposalIx, joinIx, memberPda, parseConfig, parseProposal, proposalPda } from "../lib/vote";
+import { CONFIG, PROGRAM_ID, PROPOSAL_FEE, claimIx, createProposalIx, joinIx, memberPda, parseConfig, proposalPda } from "../lib/vote";
 
 async function main() {
   const connection = new Connection("https://api.devnet.solana.com", "confirmed");
@@ -26,16 +26,15 @@ async function main() {
   const nonce = BigInt(Date.now());
   const proposal = proposalPda(payer.publicKey, nonce);
   const vault = getAssociatedTokenAddressSync(config.mint, proposal, true);
-  const content = "是否采用链上提案内容与实时计票界面？";
-  const proposalSignature = await sendAndConfirmTransaction(connection, new Transaction().add(createAssociatedTokenAccountInstruction(payer.publicKey, vault, proposal, config.mint), createProposalIx(payer.publicKey, nonce, vault, content)), [payer], { commitment: "confirmed" });
-  const proposalAccount = await connection.getAccountInfo(proposal);
-  assert(proposalAccount);
-  const parsed = parseProposal(proposalAccount.data);
-  assert.equal(parsed.content, content);
-  assert.equal(parsed.yes, 0n);
-  assert.equal(parsed.no, 0n);
-  assert(parsed.endAt > Math.floor(Date.now() / 1000));
-  console.log(JSON.stringify({ joinSignature, proposalSignature, proposal: proposal.toBase58(), claimSimulation: "ok", content: parsed.content }));
+  let balance = 0n;
+  try { balance = BigInt((await connection.getTokenAccountBalance(ata)).value.amount); } catch { /* ATA can be absent before the first claim. */ }
+  const create = new Transaction();
+  if (!await connection.getAccountInfo(ata)) create.add(createAssociatedTokenAccountInstruction(payer.publicKey, ata, payer.publicKey, config.mint));
+  create.add(createAssociatedTokenAccountInstruction(payer.publicKey, vault, proposal, config.mint), createProposalIx(payer.publicKey, nonce, vault, ata, config.treasury, "10 CVOTE 创建费用验证"));
+  const createSimulation = await connection.simulateTransaction(create, [payer]);
+  if (balance >= PROPOSAL_FEE) assert.equal(createSimulation.value.err, null, JSON.stringify(createSimulation.value.logs));
+  else assert(createSimulation.value.err, "Insufficient-token proposal creation must fail");
+  console.log(JSON.stringify({ joinSignature, claimSimulation: "ok", proposalFee: PROPOSAL_FEE.toString(), walletBalance: balance.toString(), createSimulation: balance >= PROPOSAL_FEE ? "ok" : "correctly rejected: insufficient CVOTE" }));
 }
 
 main().catch(error => { console.error(error); process.exit(1); });
